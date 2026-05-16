@@ -117,23 +117,34 @@ function Install-AgentBrowser {
         Write-Warn "agent-browser npm install failed (exit $LASTEXITCODE) -- see $browserLog"
     }
 
-    # Prepend to current-process PATH so npx resolves from the prefix
+    # Prepend to current-process PATH so agent-browser is discoverable
     $env:PATH = "$nodePrefix;$env:PATH"
 
-    $npxExe = Resolve-NpxCmd -NpmExe $NpmExe
-    if ($npxExe) {
-        Write-Info "Installing Playwright Chromium..."
-        $pwLog = "$env:TEMP\hermes-$LogPrefix-playwright-$(Get-Random).log"
-        & $npxExe playwright install chromium *> $pwLog
-        if ($LASTEXITCODE -eq 0) {
-            Write-Success "Playwright Chromium installed"
+    # Use agent-browser's own browser installer (v0.26+) instead of npx playwright.
+    # npx playwright install chromium fails with npm -g --prefix installs because
+    # there's no local package.json with playwright in the dependency tree.
+    # agent-browser install downloads Chrome directly into ~/.agent-browser/browsers/.
+    $abExe = Get-Command agent-browser -ErrorAction SilentlyContinue
+    if ($abExe) {
+        Write-Info "Installing browser engine (agent-browser install)..."
+        $pwLog = "$env:TEMP\hermes-$LogPrefix-browser-engine-$(Get-Random).log"
+        # Temporarily relax ErrorActionPreference: agent-browser writes download
+        # progress to stderr, which PS 5.1 wraps as ErrorRecord objects and throws
+        # on with $ErrorActionPreference = "Stop".  Same pattern as uv install above.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $abExe.Source install *> $pwLog
+        $abInstallExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($abInstallExit -eq 0) {
+            Write-Success "Browser engine installed"
             Remove-Item -Force $pwLog -ErrorAction SilentlyContinue
         } else {
-            Write-Warn "Playwright Chromium install failed (exit $LASTEXITCODE) -- see $pwLog"
+            Write-Warn "Browser engine install failed (exit $abInstallExit) -- see $pwLog"
         }
     } else {
-        Write-Warn "npx not found -- skipping Playwright Chromium install."
-        Write-Info "Run manually: npx playwright install chromium"
+        Write-Warn "agent-browser not found on PATH after install -- skipping browser engine."
+        Write-Info "Run manually: agent-browser install"
     }
 }
 
