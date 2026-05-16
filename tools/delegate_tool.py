@@ -1120,6 +1120,9 @@ def _build_child_agent(
         iteration_budget=None,  # fresh budget per subagent
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
+    if getattr(parent_agent, "llm_trace_enabled", False):
+        child.llm_trace_enabled = True
+        child._llm_trace_file = getattr(parent_agent, "_llm_trace_file", None)
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = child_depth
     # Stash the post-degrade role for introspection (leaf if the

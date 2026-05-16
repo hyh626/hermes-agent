@@ -6427,6 +6427,9 @@ class GatewayRunner:
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
 
+        if canonical == "logllm":
+            return await self._handle_logllm_command(event)
+
         if canonical == "model":
             return await self._handle_model_command(event)
 
@@ -10558,6 +10561,62 @@ class GatewayRunner:
         else:
             enable_session_yolo(session_key)
             return EphemeralReply(t("gateway.yolo.enabled"))
+
+    async def _handle_logllm_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+        """Handle /logllm — toggle per-session LLM request/response trace logging."""
+        source = event.source
+        session_key = self._session_key_for_source(source)
+
+        parts = (event.text or "").strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        agent = self._running_agents.get(session_key)
+        if not agent or agent is _AGENT_PENDING_SENTINEL:
+            _cache_lock = getattr(self, "_agent_cache_lock", None)
+            _cache = getattr(self, "_agent_cache", None)
+            if _cache_lock and _cache is not None:
+                with _cache_lock:
+                    cached = _cache.get(session_key)
+                    if cached:
+                        agent = cached[0]
+
+        if not agent or agent is _AGENT_PENDING_SENTINEL:
+            return EphemeralReply("No active agent for this session — send a message first.")
+
+        current = getattr(agent, "llm_trace_enabled", False)
+
+        if arg == "status":
+            state = "ON" if current else "OFF"
+            trace_file = getattr(agent, "_llm_trace_file", None)
+            msg = f"LLM trace logging: {state}"
+            if current and trace_file:
+                msg += f"\nTrace file: {trace_file}"
+            return EphemeralReply(msg)
+
+        if arg == "on":
+            new_state = True
+        elif arg == "off":
+            new_state = False
+        else:
+            new_state = not current
+
+        agent.llm_trace_enabled = new_state
+
+        if new_state:
+            from hermes_constants import get_hermes_home
+            log_dir = get_hermes_home() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = log_dir / f"llm_trace_{getattr(agent, 'session_id', 'unknown')}.jsonl"
+            agent._llm_trace_file = str(trace_path)
+            return EphemeralReply(
+                f"LLM trace logging ON\nEach request/response will be logged to:\n{trace_path}"
+            )
+        else:
+            trace_file = getattr(agent, "_llm_trace_file", None)
+            msg = "LLM trace logging OFF"
+            if trace_file:
+                msg += f"\nTrace saved to: {trace_file}"
+            return EphemeralReply(msg)
 
     async def _handle_verbose_command(self, event: MessageEvent) -> str:
         """Handle /verbose command — cycle tool progress display mode.

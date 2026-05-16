@@ -7485,6 +7485,8 @@ class HermesCLI:
             self._handle_reasoning_command(cmd_original)
         elif canonical == "fast":
             self._handle_fast_command(cmd_original)
+        elif canonical == "logllm":
+            self._handle_logllm_command(cmd_original)
         elif canonical == "compress":
             self._manual_compress(cmd_original)
         elif canonical == "usage":
@@ -7766,6 +7768,9 @@ class HermesCLI:
                 )
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
+                if getattr(self.agent, "llm_trace_enabled", False):
+                    bg_agent.llm_trace_enabled = True
+                    bg_agent._llm_trace_file = getattr(self.agent, "_llm_trace_file", None)
 
                 def _bg_thinking(text: str) -> None:
                     # Concurrent bg tasks may race on _spinner_text; acceptable for best-effort UI.
@@ -8408,6 +8413,63 @@ class HermesCLI:
                 f"  ⚡ YOLO mode {_Colors.BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
                 " — all commands auto-approved. Use with caution."
             )
+
+    def _handle_logllm_command(self, cmd: str):
+        """Handle /logllm — toggle per-session LLM request/response trace logging.
+
+        Usage:
+            /logllm           Toggle LLM trace logging on/off
+            /logllm on        Enable LLM trace logging
+            /logllm off       Disable LLM trace logging
+            /logllm status    Show current trace logging state
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if not self.agent:
+            _cprint(f"  {_DIM}No active agent — start a conversation first.{_RST}")
+            return
+
+        current = getattr(self.agent, "llm_trace_enabled", False)
+        trace_file = getattr(self.agent, "_llm_trace_file", None)
+
+        if arg == "status":
+            state = f"{_BOLD}{_Colors.GREEN}ON{_Colors.RESET}" if current else "OFF"
+            _cprint(f"  {_ACCENT}LLM trace logging: {state}{_RST}")
+            if current and trace_file:
+                _cprint(f"  {_DIM}Trace file: {trace_file}{_RST}")
+            return
+
+        if arg == "on":
+            new_state = True
+        elif arg == "off":
+            new_state = False
+        else:
+            new_state = not current
+
+        self.agent.llm_trace_enabled = new_state
+
+        if new_state:
+            from hermes_constants import get_hermes_home
+            log_dir = get_hermes_home() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = log_dir / f"llm_trace_{self.agent.session_id}.jsonl"
+            self.agent._llm_trace_file = str(trace_path)
+            _cprint(
+                f"  {_BOLD}{_Colors.GREEN}✓{_Colors.RESET} LLM trace logging "
+                f"{_BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
+            )
+            _cprint(f"  {_DIM}Each LLM request/response will be appended to:{_RST}")
+            _cprint(f"  {_DIM}  {trace_path}{_RST}")
+            _cprint(f"  {_DIM}Disable with: /logllm off{_RST}")
+        else:
+            if trace_file:
+                _cprint(
+                    f"  {_ACCENT}✓ LLM trace logging {_BOLD}OFF{_RST}"
+                )
+                _cprint(f"  {_DIM}Trace saved to: {trace_file}{_RST}")
+            else:
+                _cprint(f"  {_ACCENT}✓ LLM trace logging {_BOLD}OFF{_RST}")
 
     def _handle_reasoning_command(self, cmd: str):
         """Handle /reasoning — manage effort level and display toggle.

@@ -1240,6 +1240,8 @@ class AIAgent:
         self.save_trajectories = save_trajectories
         self.verbose_logging = verbose_logging
         self.quiet_mode = quiet_mode
+        self.llm_trace_enabled = False
+        self._llm_trace_file = None
         self.ephemeral_system_prompt = ephemeral_system_prompt
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
         self._user_id = user_id  # Platform user identifier (gateway sessions)
@@ -1907,6 +1909,19 @@ class AIAgent:
         self.logs_dir = hermes_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+
+        if not self.llm_trace_enabled:
+            try:
+                from hermes_cli.config import read_raw_config
+                _cfg = read_raw_config()
+                _llm_trace_cfg = _cfg.get("logging", {}).get("llm_trace", False) if isinstance(_cfg, dict) else False
+                if _llm_trace_cfg:
+                    self.llm_trace_enabled = True
+                    _trace_dir = hermes_home / "logs"
+                    _trace_dir.mkdir(parents=True, exist_ok=True)
+                    self._llm_trace_file = str(_trace_dir / f"llm_trace_{self.session_id}.jsonl")
+            except Exception:
+                pass
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
@@ -4283,6 +4298,9 @@ class AIAgent:
                     review_agent._user_profile_enabled = self._user_profile_enabled
                     review_agent._memory_nudge_interval = 0
                     review_agent._skill_nudge_interval = 0
+                    if self.llm_trace_enabled:
+                        review_agent.llm_trace_enabled = True
+                        review_agent._llm_trace_file = self._llm_trace_file
                     # Suppress all status/warning emits from the fork so the
                     # user only sees the final successful-action summary.
                     # Without this, mid-review "Iteration budget exhausted",
@@ -5095,7 +5113,119 @@ class AIAgent:
                 logging.warning(f"Failed to dump API request debug payload: {dump_error}")
             return None
 
-    @staticmethod
+    def _write_llm_trace(
+        self,
+        api_kwargs: dict,
+        response: Any,
+        *,
+        api_call_count: int,
+        api_duration: float,
+    ) -> None:
+        """Append a request/response trace entry to the LLM trace JSONL file.
+
+        Only writes when ``llm_trace_enabled`` is True and ``_llm_trace_file``
+        is set (both are controlled by the ``/logllm`` CLI command).
+        """
+        if not self.llm_trace_enabled or not self._llm_trace_file:
+            return
+        try:
+            import json as _json
+
+            req_body = copy.deepcopy(api_kwargs)
+            req_body.pop("timeout", None)
+            req_body = {k: v for k, v in req_body.items() if v is not None}
+
+            resp_summary: Dict[str, Any] = {
+                "model": getattr(response, "model", None),
+                "finish_reason": None,
+                "usage": None,
+                "content_preview": None,
+                "tool_calls": None,
+            }
+            if response is not None:
+                resp_summary["usage"] = str(getattr(response, "usage", None))
+                if self.api_mode == "codex_responses":
+                    resp_summary["finish_reason"] = getattr(response, "status", None)
+                    _out = getattr(response, "output_text", None)
+                    if _out and isinstance(_out, str):
+                        resp_summary["content_preview"] = _out[:2000]
+                elif self.api_mode == "anthropic_messages":
+                    _stop = getattr(response, "stop_reason", None)
+                    resp_summary["finish_reason"] = _stop
+                    _content = getattr(response, "content", None)
+                    if isinstance(_content, list):
+                        for _block in _content:
+                            if getattr(_block, "type", None) == "text":
+                                resp_summary["content_preview"] = (_block.text or "")[:2000]
+                                break
+                        _tc_blocks = [
+                            {"id": getattr(b, "id", ""), "name": getattr(b, "name", ""), "input": getattr(b, "input", {})}
+                            for b in _content
+                            if getattr(b, "type", None) == "tool_use"
+                        ]
+                        if _tc_blocks:
+                            resp_summary["tool_calls"] = _tc_blocks
+                elif self.api_mode == "bedrock_converse":
+                    _out_c = getattr(response, "output", None)
+                    if _out_c:
+                        _msg = getattr(_out_c, "message", None)
+                        if _msg:
+                            _msg_content = getattr(_msg, "content", [])
+                            for _b in _msg_content:
+                                if hasattr(_b, "text"):
+                                    resp_summary["content_preview"] = _b.text[:2000]
+                                    break
+                                if hasattr(_b, "tool_use"):
+                                    _tc_list = resp_summary.get("tool_calls") or []
+                                    _tc_list.append({
+                                        "id": getattr(_b.tool_use, "tool_use_id", ""),
+                                        "name": getattr(_b.tool_use, "name", ""),
+                                        "input": getattr(_b.tool_use, "input", {}),
+                                    })
+                                    resp_summary["tool_calls"] = _tc_list
+                    resp_summary["finish_reason"] = getattr(
+                        getattr(response, "stop_reason", None), "value", None
+                    ) if hasattr(getattr(response, "stop_reason", None), "value") else str(getattr(response, "stop_reason", None))
+                else:
+                    _choices = getattr(response, "choices", None)
+                    if _choices:
+                        _first = _choices[0]
+                        resp_summary["finish_reason"] = getattr(_first, "finish_reason", None)
+                        _msg_obj = getattr(_first, "message", None)
+                        if _msg_obj:
+                            _ct = getattr(_msg_obj, "content", None)
+                            if _ct:
+                                resp_summary["content_preview"] = _ct[:2000]
+                            _tcs = getattr(_msg_obj, "tool_calls", None)
+                            if _tcs:
+                                resp_summary["tool_calls"] = [
+                                    {
+                                        "id": getattr(tc, "id", ""),
+                                        "name": getattr(tc.function, "name", "") if hasattr(tc, "function") else "",
+                                        "arguments": getattr(tc.function, "arguments", "") if hasattr(tc, "function") else "",
+                                    }
+                                    for tc in _tcs
+                                ]
+
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "session_id": self.session_id,
+                "api_call_index": api_call_count,
+                "model": self.model,
+                "provider": self.provider,
+                "api_mode": self.api_mode,
+                "duration_s": round(api_duration, 3),
+                "request": req_body,
+                "response": resp_summary,
+            }
+
+            with open(self._llm_trace_file, "a", encoding="utf-8") as _tf:
+                _tf.write(_json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except Exception as _trace_err:
+            if self.verbose_logging:
+                logging.debug(f"LLM trace write failed: {_trace_err}")
+
+
     def _clean_session_content(content: str) -> str:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
         if not content:
@@ -12809,6 +12939,13 @@ class AIAgent:
                                     f"{int(sleep_end - time.time())}s remaining"
                                 )
                         continue  # Retry the API call
+
+                    if self.llm_trace_enabled:
+                        self._write_llm_trace(
+                            api_kwargs, response,
+                            api_call_count=api_call_count,
+                            api_duration=api_duration,
+                        )
 
                     # Check finish_reason before proceeding
                     if self.api_mode == "codex_responses":
