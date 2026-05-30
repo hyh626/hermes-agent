@@ -593,15 +593,17 @@ def _build_child_system_prompt(
         )
     parts.append(
         "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
+        "When finished, provide a brief summary of:\n"
         "- What you did\n"
         "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
+        "- Any files you created or modified (with full paths)\n"
         "- Any issues encountered\n\n"
+        "CRITICAL: Your final response is returned verbatim to the parent agent. "
+        "Keep it SHORT — no more than 500 characters. "
+        "Write any detailed output (code, data, logs) to files instead of including them in your summary. "
+        "The parent can read your files if it needs details.\n\n"
         "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
-        "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Be thorough but concise -- your response is returned to the "
-        "parent agent as a summary."
+        "If no exact local path is provided, discover it first before issuing git/workdir-specific commands."
     )
     if role == "orchestrator":
         child_note = (
